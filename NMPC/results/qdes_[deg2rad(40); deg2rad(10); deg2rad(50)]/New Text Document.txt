@@ -1,0 +1,3 @@
+q1 = 40° — meaningful base rotation, no kinematic concern at all (joint 1 never approaches a singularity by itself, since it just rotates the whole arm rigidly)
+q2 = 10° (from 45°) — real change in gravity loading (cos(10°) ≈ 0.98 vs cos(45°) ≈ 0.71), but the arm isn't anywhere near fully horizontal or vertical, so you're not stressing the Jacobian
+q3 = 50° (from -30°) — large swing, real change in M22/M23 (which depend on cos(q3)), but mid-range, not at an extreme fold
