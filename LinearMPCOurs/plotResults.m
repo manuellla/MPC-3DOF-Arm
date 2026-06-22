@@ -1,121 +1,127 @@
-%% plot_RRR_mpc_results.m
-% Plots logged joint angles vs desired, and animates the resulting
-% trajectory using Peter Corke's Robotics Toolbox.
-%
-% Assumes the Simulink model was run and produced a Simulink.SimulationOutput
-% object called "out" in the base workspace, containing:
-%   out.q_log     -- actual joint angles (3 columns: q1 q2 q3)
-%   out.qdes_log  -- desired joint angles (3 columns: q1 q2 q3)
-%   out.tout      -- time vector
-%
-% Run setup_RRR_mpc.m at least once before this (or have q_star/robot
-% params available) is NOT required here -- this script rebuilds the
-% robot model itself so it's self-contained.
+%% ========================================================================
+%  POS-PROCESSAMENTO: Plots de rastreamento + animacao do braco (RTB)
+%  MPC LINEAR - Rodar DEPOIS da simulacao Simulink (variavel 'out' no workspace)
+% ========================================================================
 
-clear q t qdes  % avoid stale variables from previous runs
+%% --- 1. Extrair dados logados ---
+% out.q_log, out.u e out.qdes_log sao arrays 'double' diretos (formato
+% "Array" no To Workspace), NAO sao objetos timeseries - por isso nao tem
+% .Time/.Data. O vetor de tempo vem separadamente de out.tout_log.
+t       = out.tout_log;            % N x 1 - vetor de tempo (Clock logado)
+q_real  = out.q_log;                % N x 3 - ja e a matriz direta (posicao ABSOLUTA, apos soma com x_star)
 
-%% --- Extract data robustly from the SimulationOutput object ---
-% Depending on "Save format" chosen in the To Workspace blocks, the
-% logged signal could come back as a plain array, a timeseries object,
-% or wrapped in a "Structure With Time". Handle all three.
+% Neste modelo (MPC Linear), qdes_log ja vem como N x 3 diretamente -
+% diferente do modelo NMPC, que logava como 1x3xN. Sem squeeze/transpose aqui.
+q_des = out.qdes_log;               % N x 3 - ja e a matriz direta
 
-q    = extract_logged_signal(out.q_log);
-qdes = extract_logged_signal(out.qdes_log);
+u_log = out.u;                      % N x 3 - ja e a matriz direta (torque ABSOLUTO, pos-saturacao)
 
-% Time vector: prefer out.tout if present, else timeseries' own time
-if isprop(out, 'tout') || isfield(out, 'tout')
-    t = out.tout;
-else
-    t = (0:size(q,1)-1)';  % fallback: sample index, not real time
+% Checagem rapida de consistencia
+fprintf('size(q_real) = %s\n', mat2str(size(q_real)));
+fprintf('size(q_des)  = %s\n', mat2str(size(q_des)));
+fprintf('size(u_log)  = %s\n', mat2str(size(u_log)));
+
+%% --- Pasta de saida para as figuras ---
+results_dir = fullfile(pwd, 'results_mpc_linear');
+if ~exist(results_dir, 'dir')
+    mkdir(results_dir);
 end
+fprintf('Figuras serao salvas em: %s\n', results_dir);
 
-% Sanity check on shapes
-if size(q,2) ~= 3 || size(qdes,2) ~= 3
-    error(['Expected q_log and qdes_log to have 3 columns (one per joint). ' ...
-           'Got size(q)=%s, size(qdes)=%s. Check To Workspace block wiring.'], ...
-           mat2str(size(q)), mat2str(size(qdes)));
-end
+%% --- 2. Plot: Q real vs Q desejado (por junta) ---
+figure('Name','Rastreamento de Posicao Articular - MPC Linear','Position',[100 100 900 700]);
 
-%% --- Plot joint angles: actual vs desired ---
-figure('Name', 'Joint Angles: Actual vs Desired', 'Color', 'w');
-jointNames = {'q_1', 'q_2', 'q_3'};
+labels = {'q_1 (Base)', 'q_2 (Ombro)', 'q_3 (Cotovelo)'};
+
 for i = 1:3
-    subplot(3,1,i);
-    plot(t, q(:,i), 'b-', 'LineWidth', 1.5); hold on;
-    plot(t, qdes(:,i), 'r--', 'LineWidth', 1.5);
-    grid on;
-    ylabel([jointNames{i} ' (rad)']);
-    if i == 1
-        legend('Actual', 'Desired', 'Location', 'best');
-        title('Joint Angles: Actual vs Desired');
-    end
+    subplot(3,1,i)
+    plot(t, rad2deg(q_real(:,i)), 'b-', 'LineWidth', 1.5); hold on
+    plot(t, rad2deg(q_des(:,i)),  'r--', 'LineWidth', 1.5);
+    grid on
+    ylabel('Angulo (graus)')
+    title(labels{i})
+    legend('q real','q desejado','Location','best')
     if i == 3
-        xlabel('Time (s)');
+        xlabel('Tempo (s)')
     end
 end
+sgtitle('Rastreamento de Trajetoria - MPC Linear')
 
-%% --- Rebuild the robot model (same parameters as setup_RRR_mpc.m) ---
-g  = 9.81;
-d1 = 0.0919;
-a2 = 0.2385;
-a3 = 0.235;
-m1 = 0.20;
-m2 = 0.40;
-m3 = 0.30;
+exportgraphics(gcf, fullfile(results_dir, 'rastreamento_juntas.png'), 'Resolution', 200);
 
-L(1) = Link('revolute', 'd', d1, 'a', 0,  'alpha', pi/2);
-L(2) = Link('revolute', 'd', 0,  'a', a2, 'alpha', 0);
-L(3) = Link('revolute', 'd', 0,  'a', a3, 'alpha', 0);
+%% --- 3. Plot: Torques de controle ---
+figure('Name','Sinais de Controle (Torques) - MPC Linear','Position',[150 150 900 500]);
 
-L(1).m = m1; L(1).r = [0, 0, -d1/2];
-L(1).I = diag([m1*d1^2/12, m1*d1^2/12, 0]);
+tau_labels = {'\tau_1 (N.m)', '\tau_2 (N.m)', '\tau_3 (N.m)'};
+tau_max = 1.5;   % limite do AX-12A (Anexo A) - linha de referencia no grafico
 
-L(2).m = m2; L(2).r = [-a2/2, 0, 0];
-L(2).I = diag([0, m2*a2^2/12, m2*a2^2/12]);
-
-L(3).m = m3; L(3).r = [-a3/2, 0, 0];
-L(3).I = diag([0, m3*a3^2/12, m3*a3^2/12]);
-
-robot = SerialLink(L, ...
-    'name', 'RRR-AX12A+garra', ...
-    'gravity', [0; 0; -g]);
-
-%% --- Animate the logged trajectory ---
-% robot.plot expects an Nx3 matrix of joint angles (radians), one row
-% per frame. We downsample if the log is very dense, so the animation
-% doesn't take forever to play.
-
-maxFrames = 200;  % cap animation frames for speed
-N = size(q,1);
-if N > maxFrames
-    idx = round(linspace(1, N, maxFrames));
-else
-    idx = 1:N;
-end
-
-figure('Name', 'RRR Arm Trajectory', 'Color', 'w');
-robot.plot(q(idx,:), 'trail', {'r', 'LineWidth', 2});
-
-%% --- Helper function ---
-function sig = extract_logged_signal(raw)
-% Normalizes a logged Simulink signal (from a To Workspace block) into
-% a plain [N x M] double array, regardless of which "Save format" was
-% used (Array, timeseries, or Structure With Time).
-
-    if isa(raw, 'timeseries')
-        sig = raw.Data;
-    elseif isstruct(raw) && isfield(raw, 'signals')
-        % "Structure With Time" format
-        sig = raw.signals.values;
-    elseif isa(raw, 'double') || isa(raw, 'single')
-        sig = double(raw);
-    else
-        error(['Unrecognized logged signal format (class: %s). ' ...
-               'Expected double array, timeseries, or "Structure With Time".'], class(raw));
-    end
-
-    % Ensure time runs down rows, channels across columns (N x 3)
-    if size(sig,2) > size(sig,1) && size(sig,1) <= 3
-        sig = sig';
+for i = 1:3
+    subplot(3,1,i)
+    plot(t, u_log(:,i), 'k-', 'LineWidth', 1.3); hold on
+    yline( tau_max, 'r--', 'LineWidth', 1, 'Label','Limite superior');
+    yline(-tau_max, 'r--', 'LineWidth', 1, 'Label','Limite inferior');
+    grid on
+    ylabel(tau_labels{i})
+    if i == 3
+        xlabel('Tempo (s)')
     end
 end
+sgtitle('Torques Aplicados pelo Controlador MPC Linear')
+
+exportgraphics(gcf, fullfile(results_dir, 'torques_controle.png'), 'Resolution', 200);
+
+%% --- 4. Plot: Erro de rastreamento ---
+figure('Name','Erro de Rastreamento - MPC Linear','Position',[200 200 900 500]);
+erro = rad2deg(q_des - q_real);
+
+plot(t, erro(:,1), 'LineWidth', 1.3); hold on
+plot(t, erro(:,2), 'LineWidth', 1.3);
+plot(t, erro(:,3), 'LineWidth', 1.3);
+yline(0, 'k:');
+grid on
+xlabel('Tempo (s)')
+ylabel('Erro (graus)')
+legend('erro q_1','erro q_2','erro q_3','Location','best')
+title('Erro de Rastreamento por Junta - MPC Linear')
+
+exportgraphics(gcf, fullfile(results_dir, 'erro_rastreamento.png'), 'Resolution', 200);
+
+%% --- 5. Simulacao/animacao do braco usando o Robotics Toolbox ---
+% Reconstroi o robot, caso nao esteja mais no workspace
+if ~exist('robot','var')
+    g  = 9.81;
+    d1 = 0.0919;
+    a2 = 0.1720 + 0.065;
+    a3 = 0.235;
+    m1 = 0.20; m2 = 0.40; m3 = 0.30;
+
+    L(1) = Link('revolute', 'd', d1, 'a', 0,  'alpha', pi/2);
+    L(2) = Link('revolute', 'd', 0,  'a', a2, 'alpha', 0   );
+    L(3) = Link('revolute', 'd', 0,  'a', a3, 'alpha', 0   );
+
+    L(1).m = m1; L(1).r = [0, 0, -d1/2];   L(1).I = diag([m1*d1^2/12, m1*d1^2/12, 0]);
+    L(2).m = m2; L(2).r = [-a2/2, 0, 0];   L(2).I = diag([0, m2*a2^2/12, m2*a2^2/12]);
+    L(3).m = m3; L(3).r = [-a3/2, 0, 0];   L(3).I = diag([0, m3*a3^2/12, m3*a3^2/12]);
+
+    robot = SerialLink(L, 'name', 'RRR-AX12A+garra', 'gravity', [0; 0; -g]);
+end
+
+% Usa TODAS as amostras de q_real (sem subamostragem - sem preocupacao com
+% velocidade agora), animando a trajetoria completa
+figure('Name','Animacao do Manipulador - MPC Linear','Position',[250 250 800 600]);
+robot.plot(q_real, ...
+    'workspace', [-0.6 0.6 -0.6 0.6 -0.05 0.6], ...
+    'jointdiam', 1.5, 'arrow', 'nobase', 'trail', 'b-', 'fps', 15);
+
+% Salva a ultima postura (final da animacao, com o rastro completo) como imagem estatica
+exportgraphics(gcf, fullfile(results_dir, 'animacao_postura_final.png'), 'Resolution', 200);
+
+% Gera tambem uma figura separada so com a postura inicial, para comparacao
+figure('Name','Postura Inicial - MPC Linear','Position',[300 300 800 600]);
+robot.plot(q_real(1,:), ...
+    'workspace', [-0.6 0.6 -0.6 0.6 -0.05 0.6], ...
+    'jointdiam', 1.5, 'arrow', 'nobase');
+title('Postura Inicial do Manipulador - MPC Linear')
+exportgraphics(gcf, fullfile(results_dir, 'postura_inicial.png'), 'Resolution', 200);
+
+fprintf('\n=== Pos-processamento concluido. Figuras salvas em: %s ===\n', results_dir);
